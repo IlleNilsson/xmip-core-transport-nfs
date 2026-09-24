@@ -2,9 +2,8 @@
 //! the few this crate answers with, and what each means to a caller —
 //! including the one that means try again.
 
+use codec::cursor::Cursor;
 use transport::error::{Result, TransportError};
-
-use crate::xdr::Reader;
 
 /// `NFS3_OK`.
 pub const OK: u32 = 0;
@@ -52,8 +51,8 @@ pub fn status_error(what: &str, status: u32) -> TransportError {
 ///
 /// # Errors
 /// The failure the status names.
-pub fn expect_ok(reader: &mut Reader<'_>, what: &str) -> Result<()> {
-    match reader.u32()? {
+pub fn expect_ok(reader: &mut Cursor<'_>, what: &str) -> Result<()> {
+    match reader.u32_be()? {
         OK => Ok(()),
         other => Err(status_error(what, other)),
     }
@@ -73,7 +72,7 @@ mod tests {
         assert!(!missing.retryable);
         assert!(status_error("writing", JUKEBOX).retryable);
         assert!(status_error("x", 999).message.ends_with("an error"));
-        expect_ok(&mut Reader::new(&[0, 0, 0, 0]), "ok").expect("ok");
-        assert!(expect_ok(&mut Reader::new(&[0, 0, 0, 13]), "no").is_err());
+        expect_ok(&mut Cursor::new(&[0, 0, 0, 0]), "ok").expect("ok");
+        assert!(expect_ok(&mut Cursor::new(&[0, 0, 0, 13]), "no").is_err());
     }
 }

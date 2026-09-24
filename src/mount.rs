@@ -6,7 +6,10 @@ use transport::error::Result;
 
 use crate::procedure::Handle;
 use crate::status::{OK, expect_ok};
-use crate::xdr::{self, Reader};
+use codec::cursor::Cursor;
+use codec::writer::ByteWriter;
+
+use crate::xdr::{Xdr, XdrWrite};
 
 /// `MOUNTPROC3_MNT`.
 pub const MNT: u32 = 1;
@@ -17,7 +20,7 @@ pub const UMNT: u32 = 3;
 #[must_use]
 pub fn args(export: &str) -> Vec<u8> {
     let mut out = Vec::new();
-    xdr::put_string(&mut out, export);
+    out.string(export);
     out
 }
 
@@ -26,17 +29,17 @@ pub fn args(export: &str) -> Vec<u8> {
 /// # Errors
 /// Where the arguments are cut short.
 pub fn take_args(arguments: &[u8]) -> Result<String> {
-    Reader::new(arguments).string()
+    Ok(Cursor::new(arguments).string()?)
 }
 
 /// A successful `MNT` result: the root handle, `AUTH_UNIX` the one flavor.
 #[must_use]
 pub fn ok(root: &Handle) -> Vec<u8> {
     let mut out = Vec::new();
-    xdr::put_u32(&mut out, OK);
+    out.u32_be(OK);
     root.put(&mut out);
-    xdr::put_u32(&mut out, 1);
-    xdr::put_u32(&mut out, 1);
+    out.u32_be(1);
+    out.u32_be(1);
     out
 }
 
@@ -44,7 +47,7 @@ pub fn ok(root: &Handle) -> Vec<u8> {
 #[must_use]
 pub fn failure(status: u32) -> Vec<u8> {
     let mut out = Vec::new();
-    xdr::put_u32(&mut out, status);
+    out.u32_be(status);
     out
 }
 
@@ -53,7 +56,7 @@ pub fn failure(status: u32) -> Vec<u8> {
 /// # Errors
 /// Where the mount was refused.
 pub fn take(results: &[u8]) -> Result<Handle> {
-    let mut reader = Reader::new(results);
+    let mut reader = Cursor::new(results);
     expect_ok(&mut reader, "mounting")?;
     Handle::take(&mut reader)
 }
@@ -71,8 +74,8 @@ mod tests {
         let error = take(&failure(ACCES)).expect_err("refused");
         assert!(error.message.contains("access denied"), "{error}");
         let mut long = Vec::new();
-        xdr::put_u32(&mut long, OK);
-        xdr::put_opaque(&mut long, &[1; 65]);
+        long.u32_be(OK);
+        long.opaque(&[1; 65]);
         assert!(take(&long).is_err(), "over sixty-four bytes");
     }
 }
