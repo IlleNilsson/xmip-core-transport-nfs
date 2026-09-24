@@ -196,7 +196,7 @@ impl NfsTransport {
 }
 
 impl Accepting for NfsTransport {
-    fn take_one(&self, listener: &TcpListener) -> Result<Arrived> {
+    fn take_one(self, listener: &TcpListener) -> Result<Arrived> {
         let mut session = self.accept_one(listener)?;
         let arrived = session
             .next_store()?
@@ -210,8 +210,7 @@ impl Accepting for NfsTransport {
 
 impl Loopback for NfsTransport {
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
-        let (listener, address) = self.bind()?;
-        Ok(Box::new(Listening::new(self.clone(), listener, address)))
+        Ok(Box::new(Listening::new(self.clone(), self.bind()?)))
     }
 
     fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
