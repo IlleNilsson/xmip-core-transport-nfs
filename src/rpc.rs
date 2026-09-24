@@ -9,7 +9,10 @@ use std::io::{Read, Write};
 
 use transport::error::{Result, TransportError, classify, protocol_error};
 
-use crate::xdr::{self, Reader};
+use codec::cursor::Cursor;
+use codec::writer::ByteWriter;
+
+use crate::xdr::{Xdr, XdrWrite};
 
 /// The NFS program, and the version this crate speaks.
 pub const NFS_PROGRAM: u32 = 100_003;
@@ -66,22 +69,22 @@ impl Call {
     #[must_use]
     pub fn to_bytes(&self, credentials: &Unix) -> Vec<u8> {
         let mut out = Vec::with_capacity(64 + self.arguments.len());
-        xdr::put_u32(&mut out, self.xid);
-        xdr::put_u32(&mut out, CALL);
-        xdr::put_u32(&mut out, RPC_VERSION);
-        xdr::put_u32(&mut out, self.program);
-        xdr::put_u32(&mut out, self.version);
-        xdr::put_u32(&mut out, self.procedure);
+        out.u32_be(self.xid);
+        out.u32_be(CALL);
+        out.u32_be(RPC_VERSION);
+        out.u32_be(self.program);
+        out.u32_be(self.version);
+        out.u32_be(self.procedure);
         let mut body = Vec::new();
-        xdr::put_u32(&mut body, 0);
-        xdr::put_string(&mut body, &credentials.machine);
-        xdr::put_u32(&mut body, credentials.uid);
-        xdr::put_u32(&mut body, credentials.gid);
-        xdr::put_u32(&mut body, 0);
-        xdr::put_u32(&mut out, AUTH_UNIX);
-        xdr::put_opaque(&mut out, &body);
-        xdr::put_u32(&mut out, AUTH_NULL);
-        xdr::put_opaque(&mut out, &[]);
+        body.u32_be(0);
+        body.string(&credentials.machine);
+        body.u32_be(credentials.uid);
+        body.u32_be(credentials.gid);
+        body.u32_be(0);
+        out.u32_be(AUTH_UNIX);
+        out.opaque(&body);
+        out.u32_be(AUTH_NULL);
+        out.opaque(&[]);
         out.extend_from_slice(&self.arguments);
         out
     }
@@ -91,31 +94,31 @@ impl Call {
     /// # Errors
     /// Where the record is not a version 2 call.
     pub fn from_bytes(record: &[u8]) -> Result<Self> {
-        let mut reader = Reader::new(record);
-        let xid = reader.u32()?;
-        if reader.u32()? != CALL {
+        let mut reader = Cursor::new(record);
+        let xid = reader.u32_be()?;
+        if reader.u32_be()? != CALL {
             return Err(protocol_error("a reply where a call was expected"));
         }
-        if reader.u32()? != RPC_VERSION {
+        if reader.u32_be()? != RPC_VERSION {
             return Err(protocol_error("an RPC version other than 2"));
         }
-        let program = reader.u32()?;
-        let version = reader.u32()?;
-        let procedure = reader.u32()?;
-        let flavor = reader.u32()?;
+        let program = reader.u32_be()?;
+        let version = reader.u32_be()?;
+        let procedure = reader.u32_be()?;
+        let flavor = reader.u32_be()?;
         let body = reader.opaque()?;
         let credentials = if flavor == AUTH_UNIX {
-            let mut unix = Reader::new(body);
-            unix.u32()?;
+            let mut unix = Cursor::new(body);
+            unix.u32_be()?;
             Some(Unix {
                 machine: unix.string()?,
-                uid: unix.u32()?,
-                gid: unix.u32()?,
+                uid: unix.u32_be()?,
+                gid: unix.u32_be()?,
             })
         } else {
             None
         };
-        reader.u32()?;
+        reader.u32_be()?;
         reader.opaque()?;
         Ok(Self {
             xid,
@@ -123,7 +126,7 @@ impl Call {
             version,
             procedure,
             credentials,
-            arguments: reader.rest().to_vec(),
+            arguments: reader.remaining().to_vec(),
         })
     }
 }
@@ -155,25 +158,18 @@ impl Reply {
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        xdr::put_u32(&mut out, self.xid);
-        xdr::put_u32(&mut out, REPLY);
-        xdr::put_u32(&mut out, MSG_ACCEPTED);
-        xdr::put_u32(&mut out, AUTH_NULL);
-        xdr::put_opaque(&mut out, &[]);
+        out.u32_be(self.xid);
+        out.u32_be(REPLY);
+        out.u32_be(MSG_ACCEPTED);
+        out.u32_be(AUTH_NULL);
+        out.opaque(&[]);
         match &self.outcome {
-            Outcome::Success(results) => {
-                xdr::put_u32(&mut out, 0);
-                out.extend_from_slice(results);
-            }
-            Outcome::ProgramUnavailable => xdr::put_u32(&mut out, 1),
-            Outcome::ProgramMismatch { low, high } => {
-                xdr::put_u32(&mut out, 2);
-                xdr::put_u32(&mut out, *low);
-                xdr::put_u32(&mut out, *high);
-            }
-            Outcome::ProcedureUnavailable => xdr::put_u32(&mut out, 3),
-            Outcome::GarbageArguments => xdr::put_u32(&mut out, 4),
-        }
+            Outcome::Success(results) => out.u32_be(0).bytes(results),
+            Outcome::ProgramUnavailable => out.u32_be(1),
+            Outcome::ProgramMismatch { low, high } => out.u32_be(2).u32_be(*low).u32_be(*high),
+            Outcome::ProcedureUnavailable => out.u32_be(3),
+            Outcome::GarbageArguments => out.u32_be(4),
+        };
         out
     }
 
@@ -182,17 +178,17 @@ impl Reply {
     /// # Errors
     /// Where the record is not a reply, or the call was denied.
     pub fn from_bytes(record: &[u8]) -> Result<Self> {
-        let mut reader = Reader::new(record);
-        let xid = reader.u32()?;
-        if reader.u32()? != REPLY {
+        let mut reader = Cursor::new(record);
+        let xid = reader.u32_be()?;
+        if reader.u32_be()? != REPLY {
             return Err(protocol_error("a call where a reply was expected"));
         }
-        match reader.u32()? {
+        match reader.u32_be()? {
             MSG_ACCEPTED => {}
             MSG_DENIED => {
-                let reason = match reader.u32()? {
+                let reason = match reader.u32_be()? {
                     0 => "the server speaks another RPC version".to_string(),
-                    _ => format!("the credentials were refused, status {}", reader.u32()?),
+                    _ => format!("the credentials were refused, status {}", reader.u32_be()?),
                 };
                 return Err(TransportError::permanent(format!(
                     "the call was denied: {reason}"
@@ -200,14 +196,14 @@ impl Reply {
             }
             other => return Err(protocol_error(format!("reply status {other}"))),
         }
-        reader.u32()?;
+        reader.u32_be()?;
         reader.opaque()?;
-        let outcome = match reader.u32()? {
-            0 => Outcome::Success(reader.rest().to_vec()),
+        let outcome = match reader.u32_be()? {
+            0 => Outcome::Success(reader.remaining().to_vec()),
             1 => Outcome::ProgramUnavailable,
             2 => Outcome::ProgramMismatch {
-                low: reader.u32()?,
-                high: reader.u32()?,
+                low: reader.u32_be()?,
+                high: reader.u32_be()?,
             },
             3 => Outcome::ProcedureUnavailable,
             4 => Outcome::GarbageArguments,
@@ -334,11 +330,11 @@ mod tests {
             assert!(!read.results().expect_err("not run").retryable);
         }
         let mut denied = Vec::new();
-        xdr::put_u32(&mut denied, 1);
-        xdr::put_u32(&mut denied, REPLY);
-        xdr::put_u32(&mut denied, MSG_DENIED);
-        xdr::put_u32(&mut denied, 1);
-        xdr::put_u32(&mut denied, 2);
+        denied.u32_be(1);
+        denied.u32_be(REPLY);
+        denied.u32_be(MSG_DENIED);
+        denied.u32_be(1);
+        denied.u32_be(2);
         let error = Reply::from_bytes(&denied).expect_err("denied");
         assert!(error.message.contains("status 2"), "{error}");
     }

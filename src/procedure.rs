@@ -7,7 +7,10 @@
 use transport::error::{Result, protocol_error};
 
 use crate::status::{OK, expect_ok};
-use crate::xdr::{self, Reader};
+use codec::cursor::Cursor;
+use codec::writer::ByteWriter;
+
+use crate::xdr::{Xdr, XdrWrite};
 
 /// `NFSPROC3_NULL`.
 pub const NULL: u32 = 0;
@@ -35,10 +38,10 @@ pub struct Handle(pub Vec<u8>);
 
 impl Handle {
     pub(crate) fn put(&self, out: &mut Vec<u8>) {
-        xdr::put_opaque(out, &self.0);
+        out.opaque(&self.0);
     }
 
-    pub(crate) fn take(reader: &mut Reader<'_>) -> Result<Self> {
+    pub(crate) fn take(reader: &mut Cursor<'_>) -> Result<Self> {
         let bytes = reader.opaque()?;
         if bytes.len() > 64 {
             return Err(protocol_error("a file handle over sixty-four bytes"));
@@ -49,11 +52,11 @@ impl Handle {
 
 /// A `post_op_attr` that carries no attributes.
 fn put_no_attributes(out: &mut Vec<u8>) {
-    xdr::put_bool(out, false);
+    out.bool(false);
 }
 
 /// Past a `post_op_attr`, whether or not it carries the eighty-four bytes.
-fn skip_attributes(reader: &mut Reader<'_>) -> Result<()> {
+fn skip_attributes(reader: &mut Cursor<'_>) -> Result<()> {
     if reader.bool()? {
         reader.fixed(84)?;
     }
@@ -62,7 +65,7 @@ fn skip_attributes(reader: &mut Reader<'_>) -> Result<()> {
 
 /// Past a `wcc_data`: the before, twenty-four bytes where present, and the
 /// after.
-fn skip_wcc(reader: &mut Reader<'_>) -> Result<()> {
+fn skip_wcc(reader: &mut Cursor<'_>) -> Result<()> {
     if reader.bool()? {
         reader.fixed(24)?;
     }
@@ -73,13 +76,13 @@ fn skip_wcc(reader: &mut Reader<'_>) -> Result<()> {
 #[must_use]
 pub fn put_failure(status: u32, procedure: u32) -> Vec<u8> {
     let mut out = Vec::new();
-    xdr::put_u32(&mut out, status);
+    out.u32_be(status);
     let bools = match procedure {
         WRITE | CREATE | REMOVE | COMMIT => 2,
         _ => 1,
     };
     for _ in 0..bools {
-        xdr::put_bool(&mut out, false);
+        out.bool(false);
     }
     out
 }
@@ -90,7 +93,7 @@ pub fn put_failure(status: u32, procedure: u32) -> Vec<u8> {
 pub fn dir_args(dir: &Handle, name: &str) -> Vec<u8> {
     let mut out = Vec::new();
     dir.put(&mut out);
-    xdr::put_string(&mut out, name);
+    out.string(name);
     out
 }
 
@@ -100,7 +103,7 @@ pub fn dir_args(dir: &Handle, name: &str) -> Vec<u8> {
 /// # Errors
 /// Where the arguments are cut short.
 pub fn take_dir_args(arguments: &[u8]) -> Result<(Handle, String)> {
-    let mut reader = Reader::new(arguments);
+    let mut reader = Cursor::new(arguments);
     Ok((Handle::take(&mut reader)?, reader.string()?))
 }
 
@@ -108,9 +111,9 @@ pub fn take_dir_args(arguments: &[u8]) -> Result<(Handle, String)> {
 #[must_use]
 pub fn create_args(dir: &Handle, name: &str) -> Vec<u8> {
     let mut out = dir_args(dir, name);
-    xdr::put_u32(&mut out, 0);
+    out.u32_be(0);
     for _ in 0..6 {
-        xdr::put_bool(&mut out, false);
+        out.bool(false);
     }
     out
 }
@@ -119,14 +122,14 @@ pub fn create_args(dir: &Handle, name: &str) -> Vec<u8> {
 #[must_use]
 pub fn handle_ok(handle: &Handle, procedure: u32) -> Vec<u8> {
     let mut out = Vec::new();
-    xdr::put_u32(&mut out, OK);
+    out.u32_be(OK);
     if procedure == CREATE {
-        xdr::put_bool(&mut out, true);
+        out.bool(true);
     }
     handle.put(&mut out);
     put_no_attributes(&mut out);
     if procedure == CREATE {
-        xdr::put_bool(&mut out, false);
+        out.bool(false);
     }
     put_no_attributes(&mut out);
     out
@@ -137,7 +140,7 @@ pub fn handle_ok(handle: &Handle, procedure: u32) -> Vec<u8> {
 /// # Errors
 /// Where the call failed, or a `CREATE` came back without a handle.
 pub fn take_handle(results: &[u8], procedure: u32) -> Result<Handle> {
-    let mut reader = Reader::new(results);
+    let mut reader = Cursor::new(results);
     expect_ok(&mut reader, "looking up")?;
     if procedure == CREATE && !reader.bool()? {
         return Err(protocol_error("the file was created without a handle"));
@@ -150,8 +153,8 @@ pub fn take_handle(results: &[u8], procedure: u32) -> Result<Handle> {
 pub fn read_args(file: &Handle, offset: u64, count: u32) -> Vec<u8> {
     let mut out = Vec::new();
     file.put(&mut out);
-    xdr::put_u64(&mut out, offset);
-    xdr::put_u32(&mut out, count);
+    out.u64_be(offset);
+    out.u32_be(count);
     out
 }
 
@@ -160,19 +163,23 @@ pub fn read_args(file: &Handle, offset: u64, count: u32) -> Vec<u8> {
 /// # Errors
 /// Where the arguments are cut short.
 pub fn take_read_args(arguments: &[u8]) -> Result<(Handle, u64, u32)> {
-    let mut reader = Reader::new(arguments);
-    Ok((Handle::take(&mut reader)?, reader.u64()?, reader.u32()?))
+    let mut reader = Cursor::new(arguments);
+    Ok((
+        Handle::take(&mut reader)?,
+        reader.u64_be()?,
+        reader.u32_be()?,
+    ))
 }
 
 /// A successful `READ` result: the bytes, and whether the file ends there.
 #[must_use]
 pub fn read_ok(data: &[u8], eof: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() + 24);
-    xdr::put_u32(&mut out, OK);
+    out.u32_be(OK);
     put_no_attributes(&mut out);
-    xdr::put_u32(&mut out, u32::try_from(data.len()).unwrap_or(u32::MAX));
-    xdr::put_bool(&mut out, eof);
-    xdr::put_opaque(&mut out, data);
+    out.u32_be(u32::try_from(data.len()).unwrap_or(u32::MAX));
+    out.bool(eof);
+    out.opaque(data);
     out
 }
 
@@ -181,10 +188,10 @@ pub fn read_ok(data: &[u8], eof: bool) -> Vec<u8> {
 /// # Errors
 /// Where the read failed.
 pub fn take_read(results: &[u8]) -> Result<(Vec<u8>, bool)> {
-    let mut reader = Reader::new(results);
+    let mut reader = Cursor::new(results);
     expect_ok(&mut reader, "reading")?;
     skip_attributes(&mut reader)?;
-    reader.u32()?;
+    reader.u32_be()?;
     let eof = reader.bool()?;
     Ok((reader.opaque()?.to_vec(), eof))
 }
@@ -194,10 +201,10 @@ pub fn take_read(results: &[u8]) -> Result<(Vec<u8>, bool)> {
 pub fn write_args(file: &Handle, offset: u64, data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() + 32);
     file.put(&mut out);
-    xdr::put_u64(&mut out, offset);
-    xdr::put_u32(&mut out, u32::try_from(data.len()).unwrap_or(u32::MAX));
-    xdr::put_u32(&mut out, FILE_SYNC);
-    xdr::put_opaque(&mut out, data);
+    out.u64_be(offset);
+    out.u32_be(u32::try_from(data.len()).unwrap_or(u32::MAX));
+    out.u32_be(FILE_SYNC);
+    out.opaque(data);
     out
 }
 
@@ -206,11 +213,11 @@ pub fn write_args(file: &Handle, offset: u64, data: &[u8]) -> Vec<u8> {
 /// # Errors
 /// Where the arguments are cut short.
 pub fn take_write_args(arguments: &[u8]) -> Result<(Handle, u64, Vec<u8>)> {
-    let mut reader = Reader::new(arguments);
+    let mut reader = Cursor::new(arguments);
     let file = Handle::take(&mut reader)?;
-    let offset = reader.u64()?;
-    reader.u32()?;
-    reader.u32()?;
+    let offset = reader.u64_be()?;
+    reader.u32_be()?;
+    reader.u32_be()?;
     Ok((file, offset, reader.opaque()?.to_vec()))
 }
 
@@ -219,12 +226,12 @@ pub fn take_write_args(arguments: &[u8]) -> Result<(Handle, u64, Vec<u8>)> {
 #[must_use]
 pub fn write_ok(count: u32, verifier: [u8; 8]) -> Vec<u8> {
     let mut out = Vec::new();
-    xdr::put_u32(&mut out, OK);
-    xdr::put_bool(&mut out, false);
+    out.u32_be(OK);
+    out.bool(false);
     put_no_attributes(&mut out);
-    xdr::put_u32(&mut out, count);
-    xdr::put_u32(&mut out, FILE_SYNC);
-    xdr::put_fixed(&mut out, &verifier);
+    out.u32_be(count);
+    out.u32_be(FILE_SYNC);
+    out.fixed(&verifier);
     out
 }
 
@@ -233,10 +240,10 @@ pub fn write_ok(count: u32, verifier: [u8; 8]) -> Vec<u8> {
 /// # Errors
 /// Where the write failed.
 pub fn take_write(results: &[u8]) -> Result<u32> {
-    let mut reader = Reader::new(results);
+    let mut reader = Cursor::new(results);
     expect_ok(&mut reader, "writing")?;
     skip_wcc(&mut reader)?;
-    reader.u32()
+    Ok(reader.u32_be()?)
 }
 
 /// `COMMIT` arguments: the whole file.
@@ -244,8 +251,8 @@ pub fn take_write(results: &[u8]) -> Result<u32> {
 pub fn commit_args(file: &Handle) -> Vec<u8> {
     let mut out = Vec::new();
     file.put(&mut out);
-    xdr::put_u64(&mut out, 0);
-    xdr::put_u32(&mut out, 0);
+    out.u64_be(0);
+    out.u32_be(0);
     out
 }
 
@@ -254,17 +261,17 @@ pub fn commit_args(file: &Handle) -> Vec<u8> {
 /// # Errors
 /// Where the arguments are cut short.
 pub fn take_commit_args(arguments: &[u8]) -> Result<Handle> {
-    Handle::take(&mut Reader::new(arguments))
+    Handle::take(&mut Cursor::new(arguments))
 }
 
 /// A successful `COMMIT` result: this server's verifier.
 #[must_use]
 pub fn commit_ok(verifier: [u8; 8]) -> Vec<u8> {
     let mut out = Vec::new();
-    xdr::put_u32(&mut out, OK);
-    xdr::put_bool(&mut out, false);
+    out.u32_be(OK);
+    out.bool(false);
     put_no_attributes(&mut out);
-    xdr::put_fixed(&mut out, &verifier);
+    out.fixed(&verifier);
     out
 }
 
@@ -272,8 +279,8 @@ pub fn commit_ok(verifier: [u8; 8]) -> Vec<u8> {
 #[must_use]
 pub fn remove_ok() -> Vec<u8> {
     let mut out = Vec::new();
-    xdr::put_u32(&mut out, OK);
-    xdr::put_bool(&mut out, false);
+    out.u32_be(OK);
+    out.bool(false);
     put_no_attributes(&mut out);
     out
 }
@@ -283,7 +290,7 @@ pub fn remove_ok() -> Vec<u8> {
 /// # Errors
 /// Where it did not.
 pub fn take_done(results: &[u8], what: &str) -> Result<()> {
-    expect_ok(&mut Reader::new(results), what)
+    expect_ok(&mut Cursor::new(results), what)
 }
 
 /// `READDIR` arguments from the start, `count` bytes at most.
@@ -291,9 +298,9 @@ pub fn take_done(results: &[u8], what: &str) -> Result<()> {
 pub fn readdir_args(dir: &Handle, count: u32) -> Vec<u8> {
     let mut out = Vec::new();
     dir.put(&mut out);
-    xdr::put_u64(&mut out, 0);
-    xdr::put_fixed(&mut out, &[0; 8]);
-    xdr::put_u32(&mut out, count);
+    out.u64_be(0);
+    out.fixed(&[0; 8]);
+    out.u32_be(count);
     out
 }
 
@@ -302,24 +309,24 @@ pub fn readdir_args(dir: &Handle, count: u32) -> Vec<u8> {
 /// # Errors
 /// Where the arguments are cut short.
 pub fn take_readdir_args(arguments: &[u8]) -> Result<Handle> {
-    Handle::take(&mut Reader::new(arguments))
+    Handle::take(&mut Cursor::new(arguments))
 }
 
 /// A successful `READDIR` result listing every name, the whole directory.
 #[must_use]
 pub fn readdir_ok(names: &[String]) -> Vec<u8> {
     let mut out = Vec::new();
-    xdr::put_u32(&mut out, OK);
+    out.u32_be(OK);
     put_no_attributes(&mut out);
-    xdr::put_fixed(&mut out, &[0; 8]);
+    out.fixed(&[0; 8]);
     for (index, name) in names.iter().enumerate() {
-        xdr::put_bool(&mut out, true);
-        xdr::put_u64(&mut out, index as u64 + 2);
-        xdr::put_string(&mut out, name);
-        xdr::put_u64(&mut out, index as u64 + 1);
+        out.bool(true);
+        out.u64_be(index as u64 + 2);
+        out.string(name);
+        out.u64_be(index as u64 + 1);
     }
-    xdr::put_bool(&mut out, false);
-    xdr::put_bool(&mut out, true);
+    out.bool(false);
+    out.bool(true);
     out
 }
 
@@ -328,15 +335,15 @@ pub fn readdir_ok(names: &[String]) -> Vec<u8> {
 /// # Errors
 /// Where the listing failed, or did not reach the end of the directory.
 pub fn take_readdir(results: &[u8]) -> Result<Vec<String>> {
-    let mut reader = Reader::new(results);
+    let mut reader = Cursor::new(results);
     expect_ok(&mut reader, "listing")?;
     skip_attributes(&mut reader)?;
     reader.fixed(8)?;
     let mut names = Vec::new();
     while reader.bool()? {
-        reader.u64()?;
+        reader.u64_be()?;
         let name = reader.string()?;
-        reader.u64()?;
+        reader.u64_be()?;
         if name != "." && name != ".." {
             names.push(name);
         }
