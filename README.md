@@ -2,6 +2,8 @@
 
 NFS transport: one file on an export is one Stream — NFS version 3 over ONC RPC on TCP, against a server or the in-process one this crate carries. A technology of [xmip-core-transport](https://github.com/IlleNilsson/xmip-core-transport).
 
+A Send Location creates, writes and commits on a connection kept per server (`transport::Pool`), each export mounted on it once. Until 2026-09-27 every file mounted and unmounted.
+
 ## Toolchain
 
 `rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it
