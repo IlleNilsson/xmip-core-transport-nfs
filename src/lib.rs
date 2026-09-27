@@ -46,7 +46,18 @@ use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
-use transport::{Arrived, Directions, NoNativeClaim, ResourceClaim, Transport};
+use transport::{Arrived, Configured, Directions, NoNativeClaim, ResourceClaim, Transport};
+use xcore::settings::{Applies, Fixed, Kind, Presence, Read, Setting, Settings};
+
+/// Whether a receive removes each file once it is a Stream, unless told
+/// otherwise.
+const DELETE_AFTER_RETRIEVE: bool = true;
+
+/// What a user or group id may be: `AUTH_UNIX` carries 32 bits.
+const ID: Kind = Kind::Integer {
+    minimum: 0,
+    maximum: u32::MAX as i64,
+};
 
 /// The export the loopback pair agrees on, and the one file put on it.
 const LOOPBACK_EXPORT: &str = "/probe";
@@ -70,7 +81,7 @@ impl NfsTransport {
             server: server.into(),
             export: export.into(),
             credentials: Unix::default(),
-            delete_after_retrieve: true,
+            delete_after_retrieve: DELETE_AFTER_RETRIEVE,
             timeout: None,
         }
     }
@@ -186,6 +197,86 @@ impl Transport for NfsTransport {
     }
 }
 
+impl Configured for NfsTransport {
+    /// The address is the server's host and port, `host:2049`: where a
+    /// Location mounts.
+    const SETTINGS: &'static Settings = &Settings {
+        technology: env!("CARGO_PKG_NAME"),
+        settings: &[
+            Setting {
+                name: "export",
+                kind: Kind::Text,
+                presence: Presence::Required,
+                meaning: "The export a Receive Location reads, and the one a Send Location \
+                          writes to when its target is a name alone.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "delete_after_retrieve",
+                kind: Kind::Boolean,
+                presence: Presence::Default(Fixed::Boolean(DELETE_AFTER_RETRIEVE)),
+                meaning: "Whether a receive removes each file once it is a Stream.",
+                applies: Applies::Receive,
+            },
+            Setting {
+                name: "machine",
+                kind: Kind::Text,
+                presence: Presence::Optional,
+                meaning: "The machine name the AUTH_UNIX credentials present; Xmip's own \
+                          when left out.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "uid",
+                kind: ID,
+                presence: Presence::Optional,
+                meaning: "The user id the AUTH_UNIX credentials present; root when left out.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "gid",
+                kind: ID,
+                presence: Presence::Optional,
+                meaning: "The group id the AUTH_UNIX credentials present; root's when left \
+                          out.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "timeout",
+                kind: Kind::Duration,
+                presence: Presence::Optional,
+                meaning: "How long a server that stops mid-reply is waited on; unbounded \
+                          when left out.",
+                applies: Applies::Both,
+            },
+        ],
+    };
+
+    fn configured(address: &str, settings: &Read) -> Result<Self> {
+        let id = |name: &str, fallback: u32| {
+            settings.optional_integer(name).map_or(Ok(fallback), |id| {
+                u32::try_from(id).map_err(|_| protocol_error(format!("{name} {id} is not 32 bits")))
+            })
+        };
+        let unix = Unix::default();
+        let credentials = Unix {
+            machine: settings
+                .optional_text("machine")
+                .map_or(unix.machine, str::to_string),
+            uid: id("uid", unix.uid)?,
+            gid: id("gid", unix.gid)?,
+        };
+        let mut transport = Self::new(address, settings.text("export")).presenting(credentials);
+        if settings.optional_boolean("delete_after_retrieve") == Some(false) {
+            transport = transport.leaving_files();
+        }
+        if let Some(timeout) = settings.optional_duration("timeout") {
+            transport = transport.timing_out_after(timeout);
+        }
+        Ok(transport)
+    }
+}
+
 impl NfsTransport {
     /// Both ends on this machine: an ephemeral local port, one export,
     /// the loopback timeout on every read.
@@ -228,6 +319,34 @@ mod tests {
 
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
+    }
+
+    #[test]
+    fn nfs_declares_its_settings_and_reads_through_them() {
+        use xcore::settings::Given;
+        assert_eq!(NfsTransport::SETTINGS.problems(), Vec::<String>::new());
+        let text = |name: &str, value: &str| (name.to_string(), Given::Text(value.to_string()));
+        let given = [
+            text("export", "/srv/in"),
+            ("delete_after_retrieve".to_string(), Given::Boolean(false)),
+            ("uid".to_string(), Given::Integer(1000)),
+            text("timeout", "2s"),
+        ];
+        let built = NfsTransport::open("files:2049", Applies::Receive, &given).expect("built");
+        assert_eq!(built.export, "/srv/in");
+        assert!(!built.delete_after_retrieve);
+        assert_eq!(built.credentials.uid, 1000);
+        assert_eq!(built.credentials.gid, 0);
+        assert_eq!(built.credentials.machine, Unix::default().machine);
+        assert_eq!(built.timeout, Some(secs(2)));
+        let Err(refused) = NfsTransport::open("files:2049", Applies::Send, &given[2..]) else {
+            panic!("export is required");
+        };
+        assert!(
+            refused.message.contains("\"export\""),
+            "{}",
+            refused.message
+        );
     }
 
     #[test]
