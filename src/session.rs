@@ -13,10 +13,10 @@ use std::io::BufReader;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
+use net::MAX_BODY;
 use transport::Arrived;
 use transport::error::Result;
 use transport::socket;
-use transport::wire::MAX_BODY;
 
 use crate::client::CHUNK;
 use crate::mount;

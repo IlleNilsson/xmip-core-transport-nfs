@@ -11,9 +11,9 @@ use std::io::BufReader;
 use std::net::TcpStream;
 use std::time::Duration;
 
+use net::MAX_BODY;
 use transport::error::{Result, protocol_error};
-use transport::socket;
-use transport::wire::MAX_BODY;
+use transport::{ceiling, socket};
 
 use crate::mount;
 use crate::procedure::{self, Handle};
@@ -123,9 +123,7 @@ impl Client {
             if eof || data.is_empty() {
                 return Ok(bytes);
             }
-            if bytes.len() > MAX_BODY {
-                return Err(protocol_error("a file longer than one Stream Xmip reads"));
-            }
+            ceiling::within(bytes.len(), MAX_BODY, "Xmip reads of one file")?;
         }
     }
 
