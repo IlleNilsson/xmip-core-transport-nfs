@@ -46,7 +46,7 @@ use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
-use transport::{Arrived, Configured, Directions, NoNativeClaim, ResourceClaim, Transport};
+use transport::{Arrived, Configured, Directions, NoNativeClaim, Pool, ResourceClaim, Transport};
 use xcore::settings::{Applies, Fixed, Kind, Presence, Read, Setting, Settings};
 
 /// Whether a receive removes each file once it is a Stream, unless told
@@ -70,6 +70,9 @@ pub struct NfsTransport {
     credentials: Unix,
     delete_after_retrieve: bool,
     timeout: Option<Duration>,
+    /// The connections a send writes on, each export mounted on each once,
+    /// kept per server.
+    writers: Pool<Client>,
 }
 
 impl NfsTransport {
@@ -83,6 +86,7 @@ impl NfsTransport {
             credentials: Unix::default(),
             delete_after_retrieve: DELETE_AFTER_RETRIEVE,
             timeout: None,
+            writers: Pool::new(),
         }
     }
 
@@ -183,13 +187,21 @@ impl Transport for NfsTransport {
         Ok(arrived)
     }
 
+    /// Create, write and commit the file on the connection kept for the
+    /// server, the export mounted on it once. The mount is not given back
+    /// per file: `UMNT` only tells the server's list of mounts, and the
+    /// connection keeps using it.
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
         let (server, export, name) = self.resolve(target)?;
-        let mut client = Client::connect(server, self.credentials.clone(), self.timeout)?;
-        let root = client.mount(&export)?;
-        let file = client.create(&root, name)?;
-        client.write_all(&file, bytes)?;
-        client.unmount(&export)
+        self.writers.exchange(
+            server,
+            || Client::connect(server, self.credentials.clone(), self.timeout),
+            |client| {
+                let root = client.root(&export)?;
+                let file = client.create(&root, name)?;
+                client.write_all(&file, bytes)
+            },
+        )
     }
 
     fn claims(&self) -> Option<&dyn ResourceClaim> {
@@ -288,14 +300,10 @@ impl NfsTransport {
 
 impl Accepting for NfsTransport {
     fn take_one(self, listener: &TcpListener) -> Result<Arrived> {
-        let mut session = self.accept_one(listener)?;
-        let arrived = session
+        // The client keeps its connection, and its mount, for the next file.
+        self.accept_one(listener)?
             .next_store()?
-            .ok_or_else(|| protocol_error("the client closed without committing"))?;
-        // Serve the unmount that follows, so the client's goodbye is
-        // answered rather than met by a closed socket.
-        while session.next_event()?.is_some() {}
-        Ok(arrived)
+            .ok_or_else(|| protocol_error("the client closed without committing"))
     }
 }
 
@@ -416,6 +424,45 @@ mod tests {
         assert!(first[0].origin_uri.ends_with("/orders/1.edi"));
         assert_eq!(first[1].bytes, [0xff, 0x00]);
         assert_eq!(again.len(), 2);
+    }
+
+    #[test]
+    fn a_thousand_files_mount_once_and_a_connection_the_server_closed_is_replaced() {
+        const SENDS: usize = 1000;
+        let far_end = NfsTransport::new("127.0.0.1:0", "/orders").timing_out_after(secs(5));
+        let (listener, address) = far_end.bind().expect("binding");
+        let near = NfsTransport::new(address, "/orders").timing_out_after(secs(5));
+        let sending = near.clone();
+        let sender = std::thread::spawn(move || {
+            let began = std::time::Instant::now();
+            for n in 0..SENDS {
+                sending.send(&format!("{n}.edi"), n.to_string().as_bytes())?;
+            }
+            let took = began.elapsed();
+            // Generous for a debug build under load: a millisecond a file.
+            assert!(took < Duration::from_millis(SENDS as u64), "{took:?}");
+            sending.send("last.edi", b"after the close")
+        });
+        let mut session = far_end.accept_one(&listener).expect("accepting");
+        let mut mounts = 0;
+        let mut stored = 0;
+        while stored < SENDS {
+            match session.next_event().expect("serving").expect("one") {
+                Event::Mounted(_) => mounts += 1,
+                Event::Committed(file) => {
+                    assert_eq!(file.bytes, stored.to_string().as_bytes());
+                    stored += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(mounts, 1, "the export is mounted once on a connection");
+        drop(session);
+        let mut again = far_end.accept_one(&listener).expect("a new connection");
+        let last = again.next_store().expect("store").expect("one");
+        assert_eq!(last.bytes, b"after the close");
+        sender.join().expect("thread").expect("sending");
+        assert_eq!(near.writers.opened(), 2);
     }
 
     #[test]

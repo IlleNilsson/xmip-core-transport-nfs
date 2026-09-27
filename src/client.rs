@@ -7,12 +7,14 @@
 //! with a program-unavailable, and this client says so; the portmapper
 //! that would find it is not spoken here.
 
+use std::collections::BTreeMap;
 use std::io::BufReader;
 use std::net::TcpStream;
 use std::time::Duration;
 
 use net::MAX_BODY;
 use transport::error::{Result, protocol_error};
+use transport::pool::{Pooled, alive};
 use transport::{ceiling, socket};
 
 use crate::mount;
@@ -26,11 +28,14 @@ pub const CHUNK: usize = 65_536;
 /// The bytes a listing asks for at once, the whole of any drop directory.
 const LISTING: u32 = 1 << 20;
 
+/// One connection to a server, kept between sends while the server keeps
+/// it open, and the root handle of each export mounted on it.
 pub struct Client {
     reader: BufReader<TcpStream>,
     writer: TcpStream,
     credentials: Unix,
     next_xid: u32,
+    mounted: BTreeMap<String, Handle>,
 }
 
 impl Client {
@@ -46,6 +51,7 @@ impl Client {
             writer,
             credentials,
             next_xid: 1,
+            mounted: BTreeMap::new(),
         })
     }
 
@@ -56,6 +62,20 @@ impl Client {
     pub fn mount(&mut self, export: &str) -> Result<Handle> {
         let results = self.mount_call(mount::MNT, mount::args(export))?;
         mount::take(&results)
+    }
+
+    /// The root handle of `export`: mounted on the first ask on this
+    /// connection, and kept for every ask after.
+    ///
+    /// # Errors
+    /// Where the server refused the mount or does not serve it here.
+    pub fn root(&mut self, export: &str) -> Result<Handle> {
+        if let Some(root) = self.mounted.get(export) {
+            return Ok(root.clone());
+        }
+        let root = self.mount(export)?;
+        self.mounted.insert(export.to_string(), root.clone());
+        Ok(root)
     }
 
     /// Say the export is no longer in use.
@@ -182,5 +202,14 @@ impl Client {
             )));
         }
         reply.results()
+    }
+}
+
+impl Pooled for Client {
+    /// While the server has not closed the connection. A root handle gone
+    /// stale with a restart fails the next call on it, which goes again on
+    /// a new connection and a new mount.
+    fn usable(&mut self) -> bool {
+        alive(&self.writer)
     }
 }
