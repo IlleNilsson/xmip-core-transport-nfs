@@ -30,7 +30,7 @@ pub const READDIR: u32 = 16;
 pub const COMMIT: u32 = 21;
 
 /// `FILE_SYNC`: the write is on disk before the reply.
-pub const FILE_SYNC: u32 = 2;
+const FILE_SYNC: u32 = 2;
 
 /// A file handle: up to sixty-four opaque bytes the server knows.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]

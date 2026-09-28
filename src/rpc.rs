@@ -255,14 +255,12 @@ pub fn write_record(writer: &mut impl Write, message: &[u8]) -> Result<()> {
 pub fn read_record(reader: &mut impl Read, max: usize) -> Result<Option<Vec<u8>>> {
     let mut record = Vec::new();
     loop {
-        let mut mark = [0u8; 4];
-        match reader.read_exact(&mut mark) {
-            Ok(()) => {}
-            Err(e) if record.is_empty() && e.kind() == std::io::ErrorKind::UnexpectedEof => {
+        let Some(mark) = net::read::header::<4>(reader, "a record mark")? else {
+            if record.is_empty() {
                 return Ok(None);
             }
-            Err(e) => return Err(classify("reading a record mark", &e)),
-        }
+            return Err(protocol_error("a record that ended between its fragments"));
+        };
         let mark = u32::from_be_bytes(mark);
         let length = (mark & !LAST_FRAGMENT) as usize;
         if record.len() + length > max {

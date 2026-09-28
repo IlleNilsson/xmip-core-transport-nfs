@@ -13,9 +13,10 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use net::MAX_BODY;
+use net::ceiling;
 use transport::error::{Result, protocol_error};
 use transport::pool::{Pooled, alive};
-use transport::{ceiling, socket};
+use transport::socket;
 
 use crate::mount;
 use crate::procedure::{self, Handle};

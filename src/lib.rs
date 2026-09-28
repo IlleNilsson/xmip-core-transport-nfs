@@ -39,6 +39,7 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 pub use client::Client;
+use net::Target;
 pub use procedure::Handle;
 pub use rpc::Unix;
 pub use session::{Event, Session};
@@ -70,8 +71,8 @@ pub struct NfsTransport {
     credentials: Unix,
     delete_after_retrieve: bool,
     timeout: Option<Duration>,
-    /// The connections a send writes on, each export mounted on each once,
-    /// kept per server.
+    /// The connections a send writes on and a receive reads on, each export
+    /// mounted on each once, kept per server.
     writers: Pool<Client>,
 }
 
@@ -140,7 +141,7 @@ impl NfsTransport {
     /// `nfs://host:2049/export/name` — or is a name alone on this
     /// transport's export.
     fn resolve<'a>(&'a self, target: &'a str) -> Result<(&'a str, String, &'a str)> {
-        match socket::target("nfs", target) {
+        match Target::under(&["nfs"], target).map(|named| (named.authority(), named.path())) {
             Some((server, path)) => {
                 let (export, name) = path
                     .rsplit_once('/')
@@ -169,22 +170,27 @@ impl Transport for NfsTransport {
     }
 
     /// Every file on the export, each removed once read unless the
-    /// transport was told to leave them.
+    /// transport was told to leave them, on the connection kept for the
+    /// server: the export mounted on the first receive.
     fn receive(&self) -> Result<Vec<Arrived>> {
-        let mut client = self.connect()?;
-        let root = client.mount(&self.export)?;
-        let mut arrived = Vec::new();
-        for name in client.list(&root)? {
-            let file = client.lookup(&root, &name)?;
-            let bytes = client.read_all(&file)?;
-            if self.delete_after_retrieve {
-                client.remove(&root, &name)?;
-            }
-            let origin = format!("nfs://{}{}/{name}", self.server, self.export);
-            arrived.push(Arrived::new(origin, bytes));
-        }
-        client.unmount(&self.export)?;
-        Ok(arrived)
+        self.writers.exchange(
+            self.server.as_str(),
+            || self.connect(),
+            |client| {
+                let root = client.root(&self.export)?;
+                let mut arrived = Vec::new();
+                for name in client.list(&root)? {
+                    let file = client.lookup(&root, &name)?;
+                    let bytes = client.read_all(&file)?;
+                    if self.delete_after_retrieve {
+                        client.remove(&root, &name)?;
+                    }
+                    let origin = format!("nfs://{}{}/{name}", self.server, self.export);
+                    arrived.push(Arrived::new(origin, bytes));
+                }
+                Ok(arrived)
+            },
+        )
     }
 
     /// Create, write and commit the file on the connection kept for the
@@ -387,8 +393,10 @@ mod tests {
         let far_end = NfsTransport::new("127.0.0.1:0", "/orders").timing_out_after(secs(2));
         let (listener, address) = far_end.bind().expect("binding");
         let receiver = std::thread::spawn(move || {
-            let near = NfsTransport::new(address.clone(), "/orders").timing_out_after(secs(2));
-            let first = near.receive()?;
+            // Two transports, so two connections: each keeps its own.
+            let first = NfsTransport::new(address.clone(), "/orders")
+                .timing_out_after(secs(2))
+                .receive()?;
             let again = NfsTransport::new(address, "/orders")
                 .leaving_files()
                 .timing_out_after(secs(2))
@@ -410,7 +418,10 @@ mod tests {
         assert_eq!(events[1], Event::Listed);
         assert_eq!(events[2], Event::Read("1.edi".to_string()));
         assert_eq!(events[3], Event::Removed("1.edi".to_string()));
-        assert_eq!(events.last(), Some(&Event::Unmounted));
+        assert!(
+            !events.contains(&Event::Unmounted),
+            "the export kept mounted"
+        );
         assert!(session.files().is_empty(), "removed after read");
         let mut session = far_end
             .accept_one(&listener)
@@ -463,6 +474,38 @@ mod tests {
         assert_eq!(last.bytes, b"after the close");
         sender.join().expect("thread").expect("sending");
         assert_eq!(near.writers.opened(), 2);
+    }
+
+    #[test]
+    fn a_thousand_receives_mount_once_and_a_connection_the_server_closed_is_replaced() {
+        const RECEIVES: usize = 1000;
+        let far_end = NfsTransport::new("127.0.0.1:0", "/orders").timing_out_after(secs(5));
+        let (listener, address) = far_end.bind().expect("binding");
+        let near = NfsTransport::new(address, "/orders").timing_out_after(secs(5));
+        let (go, going) = std::sync::mpsc::channel();
+        let receiver = std::thread::spawn(move || {
+            let began = std::time::Instant::now();
+            for _ in 0..RECEIVES {
+                assert!(near.receive()?.is_empty());
+            }
+            let took = began.elapsed();
+            // Generous for a debug build under load: a millisecond a receive.
+            assert!(took < Duration::from_millis(RECEIVES as u64), "{took:?}");
+            // A send on the same kept connection says the receives are done.
+            near.send("received.edi", b"received")?;
+            going.recv().expect("go");
+            Ok::<_, transport::TransportError>((near.receive()?, near.writers.opened()))
+        });
+        let mut session = far_end.accept_one(&listener).expect("accepting");
+        let marker = session.next_store().expect("served").expect("the marker");
+        assert_eq!(marker.bytes, b"received");
+        drop(session);
+        go.send(()).expect("went");
+        let mut again = far_end.accept_one(&listener).expect("accepting");
+        while again.next_event().expect("served").is_some() {}
+        let (arrived, opened) = receiver.join().expect("thread").expect("received");
+        assert!(arrived.is_empty());
+        assert_eq!(opened, 2);
     }
 
     #[test]
