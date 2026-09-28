@@ -12,7 +12,7 @@ pub const NOENT: u32 = 2;
 /// `NFS3ERR_ACCES`: not permitted.
 pub const ACCES: u32 = 13;
 /// `NFS3ERR_FBIG`: too big a file.
-pub const FBIG: u32 = 27;
+const FBIG: u32 = 27;
 /// `NFS3ERR_STALE`: a handle to something gone.
 pub const STALE: u32 = 70;
 /// `NFS3ERR_JUKEBOX`: not now, later.
