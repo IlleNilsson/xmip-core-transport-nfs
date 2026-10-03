@@ -14,9 +14,9 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
 use net::MAX_BODY;
-use transport::Arrived;
 use transport::error::Result;
 use transport::socket;
+use transport::taken::Taken;
 
 use crate::client::CHUNK;
 use crate::mount;
@@ -34,7 +34,7 @@ pub enum Event {
     /// The client wrote this many bytes at this offset of this name.
     Written(String, u64, usize),
     /// The client committed a file; here is the Stream.
-    Committed(Arrived),
+    Committed(Taken),
     /// The client read this name.
     Read(String),
     /// The client listed the export.
@@ -90,7 +90,7 @@ impl Session {
     ///
     /// # Errors
     /// Where the connection broke, or nothing arrived before the timeout.
-    pub fn next_store(&mut self) -> Result<Option<Arrived>> {
+    pub fn next_store(&mut self) -> Result<Option<Taken>> {
         loop {
             match self.next_event()? {
                 Some(Event::Committed(arrived)) => return Ok(Some(arrived)),
@@ -242,7 +242,7 @@ impl Session {
                 let origin = format!("nfs://{}{}/{name}", self.peer, self.export);
                 (
                     procedure::commit_ok(VERIFIER),
-                    Some(Event::Committed(Arrived::new(origin, bytes.clone()))),
+                    Some(Event::Committed(Taken::new(origin, bytes.clone()))),
                 )
             }
             None => (
