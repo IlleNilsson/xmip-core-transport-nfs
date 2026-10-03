@@ -13,7 +13,6 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use net::MAX_BODY;
-use net::ceiling;
 use transport::error::{Result, protocol_error};
 use transport::pool::{Pooled, alive};
 use transport::socket;
@@ -129,23 +128,15 @@ impl Client {
         procedure::take_done(&results, "committing")
     }
 
-    /// Read `file` from the start to its end, a chunk per call.
+    /// The next chunk of `file` from `offset`, at most one call's worth,
+    /// and whether the server says it reached the end.
     ///
     /// # Errors
-    /// Where the server refused, or grew the file past what is read here.
-    pub fn read_all(&mut self, file: &Handle) -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        loop {
-            let count = u32::try_from(CHUNK).unwrap_or(u32::MAX);
-            let args = procedure::read_args(file, bytes.len() as u64, count);
-            let results = self.nfs_call(procedure::READ, args)?;
-            let (data, eof) = procedure::take_read(&results)?;
-            bytes.extend_from_slice(&data);
-            if eof || data.is_empty() {
-                return Ok(bytes);
-            }
-            ceiling::within(bytes.len(), MAX_BODY, "Xmip reads of one file")?;
-        }
+    /// Where the server refused.
+    pub fn read_at(&mut self, file: &Handle, offset: u64) -> Result<(Vec<u8>, bool)> {
+        let count = u32::try_from(CHUNK).unwrap_or(u32::MAX);
+        let results = self.nfs_call(procedure::READ, procedure::read_args(file, offset, count))?;
+        procedure::take_read(&results)
     }
 
     /// The names in `dir`, in the server's order.
