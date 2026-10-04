@@ -9,11 +9,12 @@
 //! ONC RPC on TCP (RFC 1813, RFC 5531) — the mount program for the root
 //! handle, then `CREATE`, `WRITE` and `COMMIT` to put a Stream on the
 //! export, `READDIR`, `LOOKUP`, `READ` and `REMOVE` to take what is there,
-//! with `AUTH_UNIX` credentials and no attributes asked for. A Receive
-//! Location mounts, lists and hands each file back unread, read a `READ` at
-//! a time as the runtime asks and removed only when its receive cycle
-//! accepted it ([`connection`]); a Send Location mounts, creates, writes
-//! and commits.
+//! with `AUTH_UNIX` credentials. A Receive Location mounts, lists and hands
+//! each file back unread, read a `READ` at a time as the runtime asks and
+//! removed only when its receive cycle accepted it ([`connection`]); a
+//! refused file is left where it lies and not received again while the
+//! length and modification time a `LOOKUP` gives it are unchanged. A Send
+//! Location mounts, creates, writes and commits.
 //! Either may instead accept clients directly through [`Session`], one
 //! client's worth of server over one export in memory. The mount program
 //! is spoken on the NFS port itself, which is where a server that answers
@@ -29,6 +30,7 @@
 //! A send target is `nfs://host:2049/export/name`, or a name alone on the
 //! configured server and export.
 
+pub mod attributes;
 pub mod client;
 pub mod connection;
 pub mod mount;
@@ -41,6 +43,7 @@ pub mod xdr;
 use std::net::TcpListener;
 use std::time::Duration;
 
+pub use attributes::Stamp;
 pub use client::Client;
 pub use connection::Connection;
 use net::Target;
@@ -52,7 +55,9 @@ use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 use transport::taken::Taken;
-use transport::{Arrived, Configured, Directions, NoNativeClaim, Pool, ResourceClaim, Transport};
+use transport::{
+    Arrived, Configured, Directions, NoNativeClaim, Pool, Refused, ResourceClaim, Transport,
+};
 use xcore::settings::{Applies, Fixed, Kind, Presence, Read, Setting, Settings};
 
 /// Whether an accepted file is removed, unless told otherwise.
@@ -79,6 +84,10 @@ pub struct NfsTransport {
     /// mounted on each once, kept per server and shared with what a receive
     /// handed back.
     writers: Pool<Connection>,
+    /// The files this Location refused and left where they lie, each with
+    /// its stamp; the node process's, so a node started again receives
+    /// them once more. Cloned, the transport shares it.
+    refused: Refused<String, Stamp>,
 }
 
 impl NfsTransport {
@@ -93,6 +102,7 @@ impl NfsTransport {
             delete_after_retrieve: DELETE_AFTER_RETRIEVE,
             timeout: None,
             writers: Pool::new(),
+            refused: Refused::default(),
         }
     }
 
@@ -181,9 +191,12 @@ impl Transport for NfsTransport {
     /// Every file on the export, listed on the connection kept for the
     /// server — the export mounted on the first receive — and handed back
     /// unread: each body looks the file up on its first read and reads it a
-    /// `READ` at a time as the runtime asks; `Accepted` and `Refused`
-    /// remove it (`REMOVE`) unless the transport was told to leave files,
-    /// `Failed` leaves it for the next receive.
+    /// `READ` at a time as the runtime asks; `Accepted` removes it
+    /// (`REMOVE`) unless the transport was told to leave files, `Refused`
+    /// leaves it and it is not listed again while its length and
+    /// modification time stay as they were — asked of the server with a
+    /// `LOOKUP` for a refused name only — and `Failed` leaves it for the
+    /// next receive.
     fn receive(&self) -> Result<Vec<Arrived>> {
         self.writers.exchange(
             self.server.as_str(),
@@ -192,13 +205,19 @@ impl Transport for NfsTransport {
                 let (root, names) = connection.with(|client| {
                     let root = client.root(&self.export)?;
                     let names = client.list(&root)?;
+                    let names = self.refused.sift(
+                        names,
+                        |name| name,
+                        |name| client.stamp(&root, name).ok().flatten(),
+                    );
                     Ok((root, names))
                 })?;
                 Ok(names
                     .into_iter()
                     .map(|name| {
                         let origin = format!("nfs://{}{}/{name}", self.server, self.export);
-                        connection.arrival(origin, &root, name, self.delete_after_retrieve)
+                        let remove = self.delete_after_retrieve;
+                        connection.arrival(origin, (&root, name), remove, &self.refused)
                     })
                     .collect())
             },
@@ -247,7 +266,8 @@ impl Configured for NfsTransport {
                 name: "delete_after_retrieve",
                 kind: Kind::Boolean,
                 presence: Presence::Default(Fixed::Boolean(DELETE_AFTER_RETRIEVE)),
-                meaning: "Whether a file is removed once its receive cycle accepted it.",
+                meaning: "Whether a file is removed once its receive cycle accepted it; a \
+                          refused one is never removed.",
                 applies: Applies::Receive,
             },
             Setting {
@@ -499,14 +519,24 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_file_is_removed_and_not_listed_again() {
+    fn a_refused_file_stays_unlisted_while_unchanged_and_written_again_arrives_again() {
         let far_end = NfsTransport::new("127.0.0.1:0", "/orders").timing_out_after(secs(2));
         let (listener, address) = far_end.bind().expect("binding");
         let receiver = std::thread::spawn(move || {
             let near = NfsTransport::new(address, "/orders").timing_out_after(secs(2));
             let first = transport::arrived::one_arrival(near.receive()?, "listed")?;
             first.refused(transport::Refusal::Unidentified)?;
-            Ok::<_, transport::TransportError>(near.receive()?.len())
+            let unchanged = near.receive()?.len();
+            near.send("1.bin", b"written again")?;
+            let again = transport::arrived::one_arrival(near.receive()?, "written again")?;
+            let (_, mut body, acknowledgement) = again.into_parts();
+            let mut read = Vec::new();
+            std::io::Read::read_to_end(&mut body, &mut read).expect("reading");
+            drop(body);
+            acknowledgement.acknowledge(transport::Verdict::Refused(
+                transport::Refusal::Unidentified,
+            ))?;
+            Ok::<_, transport::TransportError>((unchanged, read, near.receive()?.len()))
         });
         let files = BTreeMap::from([("1.bin".to_string(), b"refused".to_vec())]);
         let mut session = far_end
@@ -517,12 +547,23 @@ mod tests {
         while let Some(event) = session.next_event().expect("event") {
             events.push(event);
         }
-        assert_eq!(receiver.join().expect("thread").expect("receiving"), 0);
+        let (unchanged, read, after) = receiver.join().expect("thread").expect("receiving");
+        assert_eq!(unchanged, 0, "the refused file lies there unchanged");
+        assert_eq!(read, b"written again", "written again, a new arrival");
+        assert_eq!(after, 0, "refused again, and unchanged since");
         assert!(
-            events.contains(&Event::Removed("1.bin".to_string())),
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Removed(_))),
             "{events:?}"
         );
-        assert!(session.files().is_empty(), "removed once refused");
+        assert_eq!(
+            session
+                .files()
+                .get("1.bin")
+                .expect("the refused file lies there"),
+            b"written again"
+        );
     }
 
     #[test]
