@@ -17,6 +17,7 @@ use transport::error::{Result, protocol_error};
 use transport::pool::{Pooled, alive};
 use transport::socket;
 
+use crate::attributes::Stamp;
 use crate::mount;
 use crate::procedure::{self, Handle};
 use crate::rpc::{self, Call, Reply, Unix};
@@ -92,6 +93,19 @@ impl Client {
     /// # Errors
     /// Where there is no such name.
     pub fn lookup(&mut self, dir: &Handle, name: &str) -> Result<Handle> {
+        self.looked_up(dir, name).map(|(handle, _)| handle)
+    }
+
+    /// The stamp of `name` in `dir` as it lies now, from the attributes a
+    /// `LOOKUP` answers with; `None` where the server gave none.
+    ///
+    /// # Errors
+    /// Where there is no such name.
+    pub fn stamp(&mut self, dir: &Handle, name: &str) -> Result<Option<Stamp>> {
+        self.looked_up(dir, name).map(|(_, stamp)| stamp)
+    }
+
+    fn looked_up(&mut self, dir: &Handle, name: &str) -> Result<(Handle, Option<Stamp>)> {
         let results = self.nfs_call(procedure::LOOKUP, procedure::dir_args(dir, name))?;
         procedure::take_handle(&results, procedure::LOOKUP)
     }
@@ -102,7 +116,7 @@ impl Client {
     /// Where the server refused.
     pub fn create(&mut self, dir: &Handle, name: &str) -> Result<Handle> {
         let results = self.nfs_call(procedure::CREATE, procedure::create_args(dir, name))?;
-        procedure::take_handle(&results, procedure::CREATE)
+        procedure::take_handle(&results, procedure::CREATE).map(|(handle, _)| handle)
     }
 
     /// Write `bytes` to `file` from the start, a chunk per call, and

@@ -6,7 +6,8 @@
 //! root handle and a handle per file, and the seven procedures a Stream
 //! takes. A file is handed up as a Stream when the client commits it —
 //! the one call that says the writer is done — and served back to reads
-//! and listings until it is removed. Credentials are taken as they come.
+//! and listings until it is removed; a `LOOKUP` answers with its length
+//! and when it was last written. Credentials are taken as they come.
 
 use std::collections::BTreeMap;
 use std::io::BufReader;
@@ -18,6 +19,7 @@ use transport::error::Result;
 use transport::socket;
 use transport::taken::Taken;
 
+use crate::attributes::{Stamp, Written};
 use crate::client::CHUNK;
 use crate::mount;
 use crate::procedure::{self, Handle};
@@ -54,6 +56,8 @@ pub struct Session {
     peer: SocketAddr,
     export: String,
     files: BTreeMap<String, Vec<u8>>,
+    /// When each file was last written, which a `LOOKUP` gives.
+    written: Written,
 }
 
 impl Session {
@@ -70,6 +74,7 @@ impl Session {
             peer,
             export: export.to_string(),
             files: BTreeMap::new(),
+            written: Written::default(),
         })
     }
 
@@ -161,9 +166,14 @@ impl Session {
             procedure::NULL => (Vec::new(), None),
             procedure::LOOKUP => {
                 let (_, name) = procedure::take_dir_args(arguments)?;
-                if self.files.contains_key(&name) {
+                if let Some(bytes) = self.files.get(&name) {
+                    let stamp = Stamp {
+                        length: bytes.len() as u64,
+                        modified: self.written.at(&name),
+                    };
+                    let found = handle(&name);
                     (
-                        procedure::handle_ok(&handle(&name), procedure::LOOKUP),
+                        procedure::handle_ok(&found, procedure::LOOKUP, Some(stamp)),
                         None,
                     )
                 } else {
@@ -176,7 +186,8 @@ impl Session {
             procedure::CREATE => {
                 let (_, name) = procedure::take_dir_args(arguments)?;
                 self.files.insert(name.clone(), Vec::new());
-                let results = procedure::handle_ok(&handle(&name), procedure::CREATE);
+                self.written.touch(&name);
+                let results = procedure::handle_ok(&handle(&name), procedure::CREATE, None);
                 (results, Some(Event::Created(name)))
             }
             procedure::WRITE => {
@@ -198,6 +209,7 @@ impl Session {
             }
             procedure::REMOVE => {
                 let (_, name) = procedure::take_dir_args(arguments)?;
+                self.written.forget(&name);
                 if self.files.remove(&name).is_some() {
                     (procedure::remove_ok(), Some(Event::Removed(name)))
                 } else {
@@ -228,6 +240,7 @@ impl Session {
             bytes.resize(start + data.len(), 0);
         }
         bytes[start..start + data.len()].copy_from_slice(data);
+        self.written.touch(&name);
         let count = u32::try_from(data.len()).unwrap_or(u32::MAX);
         (
             procedure::write_ok(count, VERIFIER),

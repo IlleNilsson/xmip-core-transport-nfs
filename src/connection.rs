@@ -5,7 +5,10 @@
 //! looks the file up on its first read and reads it a `READ` at a time as
 //! the runtime asks, until the server says it is the end; its
 //! acknowledgement removes it (`REMOVE`) on `Accepted`, as the receive did
-//! when it removed every file itself. NFS is stateless between calls, so
+//! when it removed every file itself. A refused file is left where it lies
+//! and remembered with the stamp a `LOOKUP` gives it then, and a listing
+//! leaves it out while it lies so (`transport::Refused`). NFS is stateless
+//! between calls, so
 //! the connection is locked for one call and its reply, never across a
 //! file: a send on the same connection goes between two reads.
 
@@ -14,8 +17,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use transport::body::chunked;
 use transport::error::Result;
 use transport::pool::Pooled;
-use transport::{Acknowledgement, Arrived, Verdict};
+use transport::{Acknowledgement, Arrived, Refused, Verdict};
 
+use crate::attributes::Stamp;
 use crate::client::Client;
 use crate::procedure::Handle;
 
@@ -43,18 +47,34 @@ impl Connection {
     }
 
     /// `name` in `root`, listed on this connection, as an arrival from
-    /// `origin`: read as the runtime asks, removed on `Accepted` and on
-    /// `Refused` where `remove` says — an export has no place for a refused
-    /// file — and left on `Failed`.
+    /// `origin`: read as the runtime asks, removed on `Accepted` where
+    /// `remove` says, left on `Failed`, and left on `Refused` and
+    /// remembered in `refused` with its stamp as it lies — a refusal is not
+    /// a consumption, and the file is the only copy.
     #[must_use]
-    pub fn arrival(&self, origin: String, root: &Handle, name: String, remove: bool) -> Arrived {
-        let connection = self.clone();
-        let (directory, removing) = (root.clone(), name.clone());
+    pub fn arrival(
+        &self,
+        origin: String,
+        (root, name): (&Handle, String),
+        remove: bool,
+        refused: &Refused<String, Stamp>,
+    ) -> Arrived {
+        let (connection, refused) = (self.clone(), refused.clone());
+        let (directory, named) = (root.clone(), name.clone());
         let acknowledgement = Acknowledgement::deferred(move |verdict| match verdict {
-            Verdict::Accepted | Verdict::Refused(_) if remove => {
-                connection.with(|client| client.remove(&directory, &removing))
+            Verdict::Accepted if remove => {
+                connection.with(|client| client.remove(&directory, &named))
             }
-            Verdict::Accepted | Verdict::Refused(_) | Verdict::Failed => Ok(()),
+            Verdict::Refused(_) => {
+                // Gone, or without a stamp, it cannot be known unchanged:
+                // listed again, if it is there.
+                let stamp = connection.with(|client| client.stamp(&directory, &named));
+                if let Ok(Some(stamp)) = stamp {
+                    refused.remember(named, stamp);
+                }
+                Ok(())
+            }
+            Verdict::Accepted | Verdict::Failed => Ok(()),
         });
         let mut file = ExportFile {
             connection: self.clone(),

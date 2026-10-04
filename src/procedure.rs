@@ -2,10 +2,12 @@
 //! arguments a client puts and a server takes, the results a server puts
 //! and a client takes. Attributes are carried as the protocol allows —
 //! absent — and skipped where a server sends them: what a Stream needs is
-//! the bytes, a name and whether the read is at its end.
+//! the bytes, a name and whether the read is at its end, and what a refused
+//! file needs is the stamp a `LOOKUP` answers with ([`crate::attributes`]).
 
 use transport::error::{Result, protocol_error};
 
+use crate::attributes::{self, Stamp};
 use crate::status::{OK, expect_ok};
 use codec::cursor::Cursor;
 use codec::writer::ByteWriter;
@@ -118,16 +120,17 @@ pub fn create_args(dir: &Handle, name: &str) -> Vec<u8> {
     out
 }
 
-/// A successful `LOOKUP` or `CREATE` result: the handle, no attributes.
+/// A successful `LOOKUP` or `CREATE` result: the handle, the file's
+/// attributes where `stamp` gives them, none of the directory's.
 #[must_use]
-pub fn handle_ok(handle: &Handle, procedure: u32) -> Vec<u8> {
+pub fn handle_ok(handle: &Handle, procedure: u32, stamp: Option<Stamp>) -> Vec<u8> {
     let mut out = Vec::new();
     out.u32_be(OK);
     if procedure == CREATE {
         out.bool(true);
     }
     handle.put(&mut out);
-    put_no_attributes(&mut out);
+    attributes::put(&mut out, stamp);
     if procedure == CREATE {
         out.bool(false);
     }
@@ -135,17 +138,19 @@ pub fn handle_ok(handle: &Handle, procedure: u32) -> Vec<u8> {
     out
 }
 
-/// The handle a `LOOKUP` or `CREATE` result carries.
+/// The handle a `LOOKUP` or `CREATE` result carries, and the file's stamp
+/// where the server gave its attributes.
 ///
 /// # Errors
 /// Where the call failed, or a `CREATE` came back without a handle.
-pub fn take_handle(results: &[u8], procedure: u32) -> Result<Handle> {
+pub fn take_handle(results: &[u8], procedure: u32) -> Result<(Handle, Option<Stamp>)> {
     let mut reader = Cursor::new(results);
     expect_ok(&mut reader, "looking up")?;
     if procedure == CREATE && !reader.bool()? {
         return Err(protocol_error("the file was created without a handle"));
     }
-    Handle::take(&mut reader)
+    let handle = Handle::take(&mut reader)?;
+    Ok((handle, attributes::take(&mut reader)?))
 }
 
 /// `READ` arguments.
@@ -368,12 +373,16 @@ mod tests {
             (dir.clone(), "a".to_string())
         );
         assert_eq!(
-            take_handle(&handle_ok(&file, CREATE), CREATE).expect("created"),
-            file
+            take_handle(&handle_ok(&file, CREATE, None), CREATE).expect("created"),
+            (file.clone(), None)
         );
+        let stamp = Stamp {
+            length: 5,
+            modified: (7, 9),
+        };
         assert_eq!(
-            take_handle(&handle_ok(&file, LOOKUP), LOOKUP).expect("found"),
-            file
+            take_handle(&handle_ok(&file, LOOKUP, Some(stamp)), LOOKUP).expect("found"),
+            (file.clone(), Some(stamp))
         );
         assert_eq!(
             take_read_args(&read_args(&file, 8, 16)).expect("read"),
