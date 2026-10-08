@@ -43,13 +43,15 @@ pub mod xdr;
 use std::net::TcpListener;
 use std::time::Duration;
 
-pub use attributes::Stamp;
+pub use attributes::{Owner, Stamp};
 pub use client::Client;
 pub use connection::Connection;
 use net::Target;
 pub use procedure::Handle;
 pub use rpc::Unix;
 pub use session::{Event, Session};
+use transport::ArrivalIdentity;
+use transport::arrival_identity::file_owner;
 use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
@@ -210,14 +212,27 @@ impl Transport for NfsTransport {
                         |name| name,
                         |name| client.stamp(&root, name).ok().flatten(),
                     );
-                    Ok((root, names))
+                    // Who owns each, as its attributes say: a `LOOKUP` each.
+                    let owned: Vec<(String, Option<Owner>)> = names
+                        .into_iter()
+                        .map(|name| {
+                            let owner = client.owner(&root, &name).ok().flatten();
+                            (name, owner)
+                        })
+                        .collect();
+                    Ok((root, owned))
                 })?;
                 Ok(names
                     .into_iter()
-                    .map(|name| {
+                    .map(|(name, owner)| {
                         let origin = format!("nfs://{}{}/{name}", self.server, self.export);
                         let remove = self.delete_after_retrieve;
-                        connection.arrival(origin, (&root, name), remove, &self.refused)
+                        let owned = owner.map_or_else(Vec::new, |owner| {
+                            file_owner(owner.uid, owner.gid, owner.mode)
+                        });
+                        connection
+                            .arrival(origin, (&root, name), remove, &self.refused)
+                            .observing_all(owned)
                     })
                     .collect())
             },
@@ -348,6 +363,12 @@ impl Accepting for NfsTransport {
 }
 
 impl Loopback for NfsTransport {
+    fn arrival_identity(&self) -> ArrivalIdentity {
+        ArrivalIdentity::Unnamed(
+            "a file names no sender: its owner and mode, as the share says, travel beside it",
+        )
+    }
+
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
         Ok(Box::new(Listening::new(self.clone(), self.bind()?)))
     }
@@ -487,6 +508,14 @@ mod tests {
             let near = NfsTransport::new(address, "/orders").timing_out_after(secs(2));
             let first = transport::arrived::one_arrival(near.receive()?, "listed")?;
             assert!(first.defers());
+            // Who owns it travels beside it, as the export's attributes say.
+            assert!(
+                first
+                    .observed()
+                    .contains(&("file.mode".to_string(), "0644".to_string())),
+                "{:?}",
+                first.observed()
+            );
             let (_, mut body, acknowledgement) = first.into_parts();
             let mut read = Vec::new();
             std::io::Read::read_to_end(&mut body, &mut read).expect("reading");

@@ -17,7 +17,7 @@ use transport::error::{Result, protocol_error};
 use transport::pool::{Pooled, alive};
 use transport::socket;
 
-use crate::attributes::Stamp;
+use crate::attributes::{Owner, Stamp};
 use crate::mount;
 use crate::procedure::{self, Handle};
 use crate::rpc::{self, Call, Reply, Unix};
@@ -102,10 +102,21 @@ impl Client {
     /// # Errors
     /// Where there is no such name.
     pub fn stamp(&mut self, dir: &Handle, name: &str) -> Result<Option<Stamp>> {
-        self.looked_up(dir, name).map(|(_, stamp)| stamp)
+        self.looked_up(dir, name)
+            .map(|(_, attributes)| attributes.map(|(stamp, _)| stamp))
     }
 
-    fn looked_up(&mut self, dir: &Handle, name: &str) -> Result<(Handle, Option<Stamp>)> {
+    /// Who owns `name` in `dir` and what it permits, as the `fattr3` a
+    /// `LOOKUP` answers with; `None` where the server gave none.
+    ///
+    /// # Errors
+    /// Where there is no such name.
+    pub fn owner(&mut self, dir: &Handle, name: &str) -> Result<Option<Owner>> {
+        self.looked_up(dir, name)
+            .map(|(_, attributes)| attributes.map(|(_, owner)| owner))
+    }
+
+    fn looked_up(&mut self, dir: &Handle, name: &str) -> Result<(Handle, Option<(Stamp, Owner)>)> {
         let results = self.nfs_call(procedure::LOOKUP, procedure::dir_args(dir, name))?;
         procedure::take_handle(&results, procedure::LOOKUP)
     }

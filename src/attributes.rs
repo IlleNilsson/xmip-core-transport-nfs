@@ -51,20 +51,33 @@ pub fn put(out: &mut Vec<u8>, stamp: Option<Stamp>) {
     }
 }
 
-/// The stamp a `post_op_attr` carries, `None` where it carries none.
+/// Who owns a file and what it permits, as `fattr3` says: its mode, owner
+/// and group, the second, fourth and fifth of its fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Owner {
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+/// The stamp and the owner a `post_op_attr` carries, `None` where it
+/// carries none.
 ///
 /// # Errors
 /// Where the attributes are cut short.
-pub fn take(reader: &mut Cursor<'_>) -> Result<Option<Stamp>> {
+pub fn take(reader: &mut Cursor<'_>) -> Result<Option<(Stamp, Owner)>> {
     if !reader.bool()? {
         return Ok(None);
     }
     let mut fattr = Cursor::new(reader.fixed(FATTR3)?);
-    fattr.take(SIZE)?;
+    fattr.take(4)?;
+    let mode = fattr.u32_be()?;
+    fattr.take(4)?;
+    let (uid, gid) = (fattr.u32_be()?, fattr.u32_be()?);
     let length = fattr.u64_be()?;
     fattr.take(MTIME - SIZE - 8)?;
     let modified = (fattr.u32_be()?, fattr.u32_be()?);
-    Ok(Some(Stamp { length, modified }))
+    Ok(Some((Stamp { length, modified }, Owner { mode, uid, gid })))
 }
 
 /// When each file on a far end's export was last written, each write
@@ -122,7 +135,12 @@ mod tests {
         put(&mut out, None);
         assert_eq!(out.len(), 4 + FATTR3 + 4);
         let mut reader = Cursor::new(&out);
-        assert_eq!(take(&mut reader).expect("stamped"), Some(stamp));
+        let owner = Owner {
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+        };
+        assert_eq!(take(&mut reader).expect("stamped"), Some((stamp, owner)));
         assert_eq!(take(&mut reader).expect("none"), None);
     }
 
