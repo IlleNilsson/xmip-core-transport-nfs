@@ -7,7 +7,7 @@
 
 use transport::error::{Result, protocol_error};
 
-use crate::attributes::{self, Stamp};
+use crate::attributes::{self, Owner, Stamp};
 use crate::status::{OK, expect_ok};
 use codec::cursor::Cursor;
 use codec::writer::ByteWriter;
@@ -139,11 +139,11 @@ pub fn handle_ok(handle: &Handle, procedure: u32, stamp: Option<Stamp>) -> Vec<u
 }
 
 /// The handle a `LOOKUP` or `CREATE` result carries, and the file's stamp
-/// where the server gave its attributes.
+/// and owner where the server gave its attributes.
 ///
 /// # Errors
 /// Where the call failed, or a `CREATE` came back without a handle.
-pub fn take_handle(results: &[u8], procedure: u32) -> Result<(Handle, Option<Stamp>)> {
+pub fn take_handle(results: &[u8], procedure: u32) -> Result<(Handle, Option<(Stamp, Owner)>)> {
     let mut reader = Cursor::new(results);
     expect_ok(&mut reader, "looking up")?;
     if procedure == CREATE && !reader.bool()? {
@@ -382,7 +382,17 @@ mod tests {
         };
         assert_eq!(
             take_handle(&handle_ok(&file, LOOKUP, Some(stamp)), LOOKUP).expect("found"),
-            (file.clone(), Some(stamp))
+            (
+                file.clone(),
+                Some((
+                    stamp,
+                    Owner {
+                        mode: 0o644,
+                        uid: 0,
+                        gid: 0
+                    }
+                ))
+            )
         );
         assert_eq!(
             take_read_args(&read_args(&file, 8, 16)).expect("read"),

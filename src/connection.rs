@@ -84,7 +84,7 @@ impl Connection {
             offset: 0,
             ended: false,
         };
-        Arrived::new(origin, chunked(move || file.next_chunk()), acknowledgement)
+        Arrived::new(origin, chunked(move || file.next_chunk()), acknowledgement).detected()
     }
 }
 
