@@ -190,6 +190,10 @@ impl Transport for NfsTransport {
         transport::Arrivals::Ordered("a receive lists again what is not yet told")
     }
 
+    fn waiting(&self) -> transport::Waiting {
+        transport::Waiting::Polled("a receive lists the export and returns")
+    }
+
     /// Every file on the export, listed on the connection kept for the
     /// server — the export mounted on the first receive — and handed back
     /// unread: each body looks the file up on its first read and reads it a
@@ -602,36 +606,84 @@ mod tests {
         let (listener, address) = far_end.bind().expect("binding");
         let near = NfsTransport::new(address, "/orders").timing_out_after(secs(5));
         let sending = near.clone();
+        let wire = loopback_round_trip();
+        // The time is judged after the last send, never in the sender: an
+        // assertion there dropped the connection before `last.edi`, and
+        // the accept below waited its five seconds for a sender gone.
         let sender = std::thread::spawn(move || {
             let began = std::time::Instant::now();
             for n in 0..SENDS {
                 sending.send(&format!("{n}.edi"), n.to_string().as_bytes())?;
             }
             let took = began.elapsed();
-            // Generous for a debug build under load: a millisecond a file.
-            assert!(took < Duration::from_millis(SENDS as u64), "{took:?}");
-            sending.send("last.edi", b"after the close")
+            sending.send("last.edi", b"after the close")?;
+            Ok::<_, transport::TransportError>(took)
         });
         let mut session = far_end.accept_one(&listener).expect("accepting");
-        let mut mounts = 0;
-        let mut stored = 0;
+        let (mut mounts, mut created, mut written, mut stored) = (0, 0, 0, 0);
         while stored < SENDS {
             match session.next_event().expect("serving").expect("one") {
                 Event::Mounted(_) => mounts += 1,
+                Event::Created(_) => created += 1,
+                Event::Written(..) => written += 1,
                 Event::Committed(file) => {
                     assert_eq!(file.bytes, stored.to_string().as_bytes());
                     stored += 1;
                 }
-                _ => {}
+                other => panic!("a send does no {other:?}"),
             }
         }
         assert_eq!(mounts, 1, "the export is mounted once on a connection");
+        assert_eq!((created, written), (SENDS, SENDS), "one CREATE, one WRITE");
         drop(session);
         let mut again = far_end.accept_one(&listener).expect("a new connection");
         let last = again.next_store().expect("store").expect("one");
         assert_eq!(last.bytes, b"after the close");
-        sender.join().expect("thread").expect("sending");
+        let took = sender.join().expect("thread").expect("sending");
         assert_eq!(near.writers.opened(), 2);
+        // A file is three calls — CREATE, WRITE, COMMIT — each a round trip
+        // on this loopback. What the transport and its far end do around
+        // the wire may not cost as much as the wire again: two round trips
+        // a call. Measured on the same loopback before and after, so the
+        // machine's load is the wire's, not a verdict on the transport.
+        let wire = wire.max(loopback_round_trip());
+        let bound = wire * u32::try_from(SENDS * CALLS_A_FILE * 2).expect("small");
+        assert!(
+            took < bound,
+            "{took:?} for {SENDS} files, over {bound:?}: {wire:?} a round trip"
+        );
+    }
+
+    /// The calls one small file takes on a kept connection with its export
+    /// mounted: `CREATE`, `WRITE`, `COMMIT`.
+    const CALLS_A_FILE: usize = 3;
+
+    /// The mean round trip of a call-sized exchange on this loopback with
+    /// Nagle's algorithm off, read and written whole on both ends: the
+    /// wire every NFS call here crosses, without the protocol.
+    fn loopback_round_trip() -> Duration {
+        const EXCHANGES: u32 = 200;
+        let (listener, address) = socket::bind_tcp("127.0.0.1:0").expect("binding");
+        let echo = std::thread::spawn(move || {
+            let (stream, _) = socket::accept_tcp(&listener, Some(secs(5))).expect("accepting");
+            let (mut reader, mut writer) = socket::split(stream).expect("split");
+            let mut call = [0u8; 128];
+            while std::io::Read::read_exact(&mut reader, &mut call).is_ok() {
+                std::io::Write::write_all(&mut writer, &call).expect("echoing");
+            }
+        });
+        let stream = socket::connect_tcp(&address, Some(secs(5))).expect("connecting");
+        let (mut reader, mut writer) = socket::split(stream).expect("split");
+        let mut call = [0u8; 128];
+        let began = std::time::Instant::now();
+        for _ in 0..EXCHANGES {
+            std::io::Write::write_all(&mut writer, &call).expect("calling");
+            std::io::Read::read_exact(&mut reader, &mut call).expect("answered");
+        }
+        let took = began.elapsed();
+        drop((reader, writer));
+        echo.join().expect("echo");
+        took / EXCHANGES
     }
 
     #[test]
