@@ -121,7 +121,7 @@ mod tests {
         assert_eq!(reader.string().expect("string"), "x");
         assert_eq!(reader.fixed(3).expect("fixed"), &[1, 2, 3]);
         assert!(reader.is_empty());
-        assert!(reader.remaining().is_empty());
+        assert_eq!(reader.remaining(), []);
     }
 
     #[test]
