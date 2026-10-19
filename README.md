@@ -2,7 +2,7 @@
 
 NFS transport: one file on an export is one Stream — NFS version 3 over ONC RPC on TCP, against a server or the in-process one this crate carries. A technology of [xmip-core-transport](https://github.com/IlleNilsson/xmip-core-transport).
 
-A Send Location creates, writes and commits on a connection kept per server (`transport::Pool`), each export mounted on it once. Until 2026-09-27 every file mounted and unmounted.
+A Send Location creates, writes and commits on a connection kept per server (`transport::Pool`), each export mounted on it once. Until 2026-09-27 every file mounted and unmounted. A send writes the Message a `WRITE` at a time as it is read from the Ledger, never whole in memory, then commits (`Sending::Streamed`, 2026-10-19), and a receive hands over no more files of a listing than the runtime has room for.
 
 A Receive Location lists, reads and removes on the same kept connection, the export mounted on it once. Until 2026-09-28 every receive mounted and unmounted.
 

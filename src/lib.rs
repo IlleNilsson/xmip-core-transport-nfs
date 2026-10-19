@@ -203,7 +203,7 @@ impl Transport for NfsTransport {
     /// modification time stay as they were — asked of the server with a
     /// `LOOKUP` for a refused name only — and `Failed` leaves it for the
     /// next receive.
-    fn receive(&self) -> Result<Vec<Arrived>> {
+    fn receive_up_to(&self, most: usize) -> Result<Vec<Arrived>> {
         self.writers.exchange(
             self.server.as_str(),
             || self.connect().map(Connection::new),
@@ -219,6 +219,7 @@ impl Transport for NfsTransport {
                     // Who owns each, as its attributes say: a `LOOKUP` each.
                     let owned: Vec<(String, Option<Owner>)> = names
                         .into_iter()
+                        .take(most)
                         .map(|name| {
                             let owner = client.owner(&root, &name).ok().flatten();
                             (name, owner)
@@ -243,11 +244,15 @@ impl Transport for NfsTransport {
         )
     }
 
+    fn sending(&self) -> transport::Sending {
+        transport::Sending::Streamed("each WRITE carries the next piece of the body as it is read")
+    }
+
     /// Create, write and commit the file on the connection kept for the
     /// server, the export mounted on it once. The mount is not given back
     /// per file: `UMNT` only tells the server's list of mounts, and the
     /// connection keeps using it.
-    fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
+    fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
         let (server, export, name) = self.resolve(target)?;
         self.writers.exchange(
             server,
@@ -256,7 +261,7 @@ impl Transport for NfsTransport {
                 connection.with(|client| {
                     let root = client.root(&export)?;
                     let file = client.create(&root, name)?;
-                    client.write_all(&file, bytes)
+                    client.write_all(&file, &outgoing)
                 })
             },
         )

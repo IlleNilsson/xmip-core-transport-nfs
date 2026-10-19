@@ -130,14 +130,15 @@ impl Client {
         procedure::take_handle(&results, procedure::CREATE).map(|(handle, _)| handle)
     }
 
-    /// Write `bytes` to `file` from the start, a chunk per call, and
+    /// Write `outgoing`'s body to `file` from the start, a chunk per call as
+    /// it is read, never whole in memory, and
     /// commit.
     ///
     /// # Errors
     /// Where the server refused or wrote short.
-    pub fn write_all(&mut self, file: &Handle, bytes: &[u8]) -> Result<()> {
+    pub fn write_all(&mut self, file: &Handle, outgoing: &transport::Outgoing<'_>) -> Result<()> {
         let mut offset = 0u64;
-        for chunk in bytes.chunks(CHUNK) {
+        outgoing.pieces(CHUNK, |chunk| {
             let results =
                 self.nfs_call(procedure::WRITE, procedure::write_args(file, offset, chunk))?;
             let written = procedure::take_write(&results)? as usize;
@@ -148,7 +149,8 @@ impl Client {
                 )));
             }
             offset += written as u64;
-        }
+            Ok(())
+        })?;
         let results = self.nfs_call(procedure::COMMIT, procedure::commit_args(file))?;
         procedure::take_done(&results, "committing")
     }
