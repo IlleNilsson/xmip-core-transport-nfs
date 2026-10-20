@@ -21,7 +21,7 @@
 //! both on one port has it and where this crate's own far end has it; the
 //! portmapper that would find a mount daemon elsewhere is not spoken.
 //!
-//! NFS has artefacts and no locking — the lock manager is another program
+//! NFS has artifacts and no locking — the lock manager is another program
 //! — so [`Transport::claims`] answers [`NoNativeClaim`], ADR-0024 clause
 //! 5: a producer writes to a temporary name and renames, or a Location
 //! waits for a listing to stop changing.
@@ -438,7 +438,7 @@ mod tests {
         assert_eq!(pair.round(&long).expect("chunks").bytes, long);
         assert_eq!(pair.name(), "nfs");
         assert_eq!(pair.directions(), Directions::BOTH);
-        assert!(pair.claims().is_some(), "files are artefacts");
+        assert!(pair.claims().is_some(), "files are artifacts");
     }
 
     #[test]
