@@ -158,7 +158,7 @@ impl NfsTransport {
     /// `nfs://host:2049/export/name` — or is a name alone on this
     /// transport's export.
     fn resolve<'a>(&'a self, target: &'a str) -> Result<(&'a str, String, &'a str)> {
-        match Target::under(&["nfs"], target).map(|named| (named.authority(), named.path())) {
+        match Target::under(Self::SCHEMES, target).map(|named| (named.authority(), named.path())) {
             Some((server, path)) => {
                 let (export, name) = path
                     .rsplit_once('/')
@@ -327,6 +327,9 @@ impl Configured for NfsTransport {
             },
         ],
     };
+
+    /// The schemes a Location's address is entered with to choose this technology.
+    const SCHEMES: &'static [&'static str] = &["nfs"];
 
     fn configured(address: &str, settings: &Read) -> Result<Self> {
         let id = |name: &str, fallback: u32| {
