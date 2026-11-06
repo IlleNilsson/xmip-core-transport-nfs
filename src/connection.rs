@@ -12,7 +12,8 @@
 //! the connection is locked for one call and its reply, never across a
 //! file: a send on the same connection goes between two reads.
 
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
+use xcore::lock::Locked;
 
 use transport::body::chunked;
 use transport::error::Result;
@@ -35,7 +36,7 @@ impl Connection {
     }
 
     fn client(&self) -> MutexGuard<'_, Client> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.0.locked()
     }
 
     /// Run `act` on the connection: one call and its reply, or a few.
