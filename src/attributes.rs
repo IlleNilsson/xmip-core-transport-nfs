@@ -4,11 +4,11 @@
 //! written plainly by this crate's far end and read past by its client.
 
 use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use codec::cursor::Cursor;
 use codec::writer::ByteWriter;
 use transport::error::Result;
+use xcore::{Clock, NANOS_A_SECOND, SystemClock};
 
 use crate::xdr::{Xdr, XdrWrite};
 
@@ -92,12 +92,10 @@ pub struct Written {
 impl Written {
     /// Note `name` written now.
     pub fn touch(&mut self, name: &str) {
-        let since = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
+        let since = SystemClock.unix_timestamp_nanos().max(0);
         let now = (
-            u32::try_from(since.as_secs()).unwrap_or(u32::MAX),
-            since.subsec_nanos(),
+            u32::try_from(since / NANOS_A_SECOND).unwrap_or(u32::MAX),
+            u32::try_from(since % NANOS_A_SECOND).unwrap_or(0),
         );
         let after = match self.newest {
             (seconds, 999_999_999) => (seconds.saturating_add(1), 0),
