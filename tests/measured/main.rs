@@ -15,6 +15,7 @@
 
 use std::time::{Duration, Instant};
 
+use transport::Configured;
 use transport::{Transport, TransportError, socket};
 use xcore::latency::{Rounds, spread};
 use xmip_core_transport_nfs::{Event, NfsTransport};

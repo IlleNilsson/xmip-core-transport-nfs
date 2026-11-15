@@ -122,13 +122,6 @@ impl NfsTransport {
         self
     }
 
-    /// Give up on a server that stops mid-reply.
-    #[must_use]
-    pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
-        self
-    }
-
     /// Connect to the server.
     ///
     /// # Errors
@@ -317,19 +310,21 @@ impl Configured for NfsTransport {
                           out.",
                 applies: Applies::Both,
             },
-            Setting {
-                name: "timeout",
-                kind: Kind::Duration,
-                presence: Presence::Optional,
-                meaning: "How long a server that stops mid-reply is waited on; unbounded \
-                          when left out.",
-                applies: Applies::Both,
-            },
+            transport::configured::timeout(
+                Applies::Both,
+                None,
+                "How long a server that stops mid-reply is waited on; unbounded \
+                 when left out.",
+            ),
         ],
     };
 
     /// The schemes a Location's address is entered with to choose this technology.
     const SCHEMES: &'static [&'static str] = &["nfs"];
+
+    fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
+        Some(&mut self.timeout)
+    }
 
     fn configured(address: &str, settings: &Read) -> Result<Self> {
         let id = |name: &str, fallback: u32| {
@@ -348,9 +343,6 @@ impl Configured for NfsTransport {
         let mut transport = Self::new(address, settings.text("export")).presenting(credentials);
         if settings.optional_boolean("delete_after_retrieve") == Some(false) {
             transport = transport.leaving_files();
-        }
-        if let Some(timeout) = settings.optional_duration("timeout") {
-            transport = transport.timing_out_after(timeout);
         }
         Ok(transport)
     }
