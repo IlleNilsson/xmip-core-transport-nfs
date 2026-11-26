@@ -29,52 +29,74 @@
 //! The origin URI carries what the server knew: `nfs://server/export/name`.
 //! A send target is `nfs://host:2049/export/name`, or a name alone on the
 //! configured server and export.
+//!
+//! **Built with its `declaration` feature alone** the crate is
+//! [`declaration`], what a Location of it is configured with, and none of
+//! the code above, which is behind the default feature: what the surfaces'
+//! library carries (ADR-0064, amendment 2026-11-26).
 
+#[cfg(feature = "default")]
 pub mod attributes;
+#[cfg(feature = "default")]
 pub mod client;
+#[cfg(feature = "default")]
 pub mod connection;
+#[cfg(feature = "declaration")]
+pub mod declaration;
+#[cfg(feature = "default")]
 pub mod mount;
+#[cfg(feature = "default")]
 pub mod procedure;
+#[cfg(feature = "default")]
 pub mod rpc;
+#[cfg(feature = "default")]
 pub mod session;
+#[cfg(feature = "default")]
 pub mod status;
+#[cfg(feature = "default")]
 pub mod xdr;
 
-use std::net::TcpListener;
-use std::time::Duration;
+#[cfg(feature = "default")]
+use std::{net::TcpListener, time::Duration};
 
+#[cfg(feature = "default")]
 pub use attributes::{Owner, Stamp};
+#[cfg(feature = "default")]
 pub use client::Client;
+#[cfg(feature = "default")]
 pub use connection::Connection;
+#[cfg(feature = "default")]
+use declaration::DELETE_AFTER_RETRIEVE;
+#[cfg(feature = "default")]
 use net::Target;
+#[cfg(feature = "default")]
 pub use procedure::Handle;
+#[cfg(feature = "default")]
 pub use rpc::Unix;
+#[cfg(feature = "default")]
 pub use session::{Event, Session};
-use transport::ArrivalIdentity;
-use transport::arrival_identity::file_owner;
+#[cfg(feature = "default")]
 use transport::error::{Result, protocol_error};
+#[cfg(feature = "default")]
 use transport::listening::{Accepting, Listening};
+#[cfg(feature = "default")]
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
-use transport::socket;
-use transport::taken::Taken;
+#[cfg(feature = "default")]
+use transport::{ArrivalIdentity, arrival_identity::file_owner, socket, taken::Taken};
+#[cfg(feature = "default")]
 use transport::{
     Arrived, Configured, Directions, NoNativeClaim, Pool, Refused, ResourceClaim, Transport,
 };
-use xcore::settings::{Applies, Fixed, Kind, Presence, Read, Setting, Settings};
-
-/// Whether an accepted file is removed, unless told otherwise.
-const DELETE_AFTER_RETRIEVE: bool = true;
-
-/// What a user or group id may be: `AUTH_UNIX` carries 32 bits.
-const ID: Kind = Kind::Integer {
-    minimum: 0,
-    maximum: u32::MAX as i64,
-};
+#[cfg(feature = "default")]
+use xcore::settings::{Read, Settings};
 
 /// The export the loopback pair agrees on, and the one file put on it.
+#[cfg(feature = "default")]
 const LOOPBACK_EXPORT: &str = "/probe";
+#[cfg(feature = "default")]
 const LOOPBACK_FILE: &str = "probe.bin";
 
+#[cfg(feature = "default")]
 #[derive(Clone)]
 pub struct NfsTransport {
     server: String,
@@ -92,6 +114,7 @@ pub struct NfsTransport {
     refused: Refused<String, Stamp>,
 }
 
+#[cfg(feature = "default")]
 impl NfsTransport {
     /// Speak to the server at `server` — `host:2049` — about `export`,
     /// as root on a machine called `xmip` until [`Self::presenting`].
@@ -170,6 +193,7 @@ impl NfsTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Transport for NfsTransport {
     fn name(&self) -> &'static str {
         "nfs"
@@ -265,62 +289,10 @@ impl Transport for NfsTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Configured for NfsTransport {
-    /// The address is the server's host and port, `host:2049`: where a
-    /// Location mounts.
-    const SETTINGS: &'static Settings = &Settings {
-        technology: env!("CARGO_PKG_NAME"),
-        settings: &[
-            Setting {
-                name: "export",
-                kind: Kind::Text,
-                presence: Presence::Required,
-                meaning: "The export a Receive Location reads, and the one a Send Location \
-                          writes to when its target is a name alone.",
-                applies: Applies::Both,
-            },
-            Setting {
-                name: "delete_after_retrieve",
-                kind: Kind::Boolean,
-                presence: Presence::Default(Fixed::Boolean(DELETE_AFTER_RETRIEVE)),
-                meaning: "Whether a file is removed once its receive cycle accepted it; a \
-                          refused one is never removed.",
-                applies: Applies::Receive,
-            },
-            Setting {
-                name: "machine",
-                kind: Kind::Text,
-                presence: Presence::Optional,
-                meaning: "The machine name the AUTH_UNIX credentials present; Xmip's own \
-                          when left out.",
-                applies: Applies::Both,
-            },
-            Setting {
-                name: "uid",
-                kind: ID,
-                presence: Presence::Optional,
-                meaning: "The user id the AUTH_UNIX credentials present; root when left out.",
-                applies: Applies::Both,
-            },
-            Setting {
-                name: "gid",
-                kind: ID,
-                presence: Presence::Optional,
-                meaning: "The group id the AUTH_UNIX credentials present; root's when left \
-                          out.",
-                applies: Applies::Both,
-            },
-            transport::configured::timeout(
-                Applies::Both,
-                None,
-                "How long a server that stops mid-reply is waited on; unbounded \
-                 when left out.",
-            ),
-        ],
-    };
-
-    /// The schemes a Location's address is entered with to choose this technology.
-    const SCHEMES: &'static [&'static str] = &["nfs"];
+    const SETTINGS: &'static Settings = declaration::SETTINGS;
+    const SCHEMES: &'static [&'static str] = declaration::SCHEMES;
 
     fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
         Some(&mut self.timeout)
@@ -348,6 +320,7 @@ impl Configured for NfsTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl NfsTransport {
     /// Both ends on this machine: an ephemeral local port, one export,
     /// the loopback timeout on every read.
@@ -357,6 +330,7 @@ impl NfsTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Accepting for NfsTransport {
     fn take_one(self, listener: &TcpListener) -> Result<Taken> {
         // The client keeps its connection, and its mount, for the next file.
@@ -366,6 +340,7 @@ impl Accepting for NfsTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Loopback for NfsTransport {
     fn arrival_identity(&self) -> ArrivalIdentity {
         ArrivalIdentity::Unnamed(
@@ -389,6 +364,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use transport::payload::edge_payloads;
+    use xcore::settings::Applies;
 
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
